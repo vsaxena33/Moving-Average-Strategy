@@ -199,6 +199,9 @@ def update_live_data(data, message, last_total_volume):
     return data, total_vol
 
 
+# ============================================================
+# Rolling EMA Calculation for Live Candle
+# ============================================================
 def rolling_ema(ltp, prev_ema, length):
     """
     Calculate the Exponential Moving Average (EMA) for a new tick using the previous EMA value.
@@ -274,7 +277,7 @@ def log_trade(action, symbol, price):
         price (float): Execution price.
     """
     with open("trades_log.csv", "a") as file:
-        file.write(f"{dt.datetime.now(pytz.timezone(timeZone))},{action},{symbol},{price}\n")
+        file.write(f"{dt.datetime.now(pytz.timezone(timeZone))},{action},'moving_avg',{symbol},{price}\n")
 
 # ============================================================
 # Candlestick Class to Manage State and WebSocket Callbacks
@@ -292,6 +295,8 @@ class Candlestick:
     Think of this class as the "brain"
     controlling the live chart.
     """
+
+    
     # ============================================================
     # Initialization
     # ============================================================
@@ -350,16 +355,19 @@ class Candlestick:
         closed_candle_time = self.data.index[-2]
         is_new_candle = closed_candle_time != self.last_evaluated_candle
 
+        ema_9       = self.data['ema_9'].iloc[-2]
+        ema_15      = self.data['ema_15'].iloc[-2]
+
         # --------------------------------------------------------
         # TICK-LEVEL Exit: Hard TP/SL (runs on EVERY tick)
         # --------------------------------------------------------
-        if self.position == 'LONG' and (ltp >= self.tp or ltp <= self.sl):
+        if self.position == 'LONG' and (ltp < ema_15 or ltp >= self.tp):#(ltp >= self.tp or ltp <= self.sl):
             print(f"[EXIT LONG] Hard TP/SL hit at {ltp}")
             bid = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['bid']
             log_trade("Sell", symbol, bid)
             self._clear_position()
 
-        elif self.position == 'SHORT' and (ltp <= self.tp or ltp >= self.sl):
+        elif self.position == 'SHORT' and (ltp > ema_15 or ltp <= self.tp):#(ltp <= self.tp or ltp >= self.sl):
             print(f"[EXIT SHORT] Hard TP/SL hit at {ltp}")
             ask = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['ask']
             log_trade("Buy", symbol, ask)
@@ -374,8 +382,7 @@ class Candlestick:
         # Mark this candle as evaluated ONCE, at the top
         self.last_evaluated_candle = closed_candle_time
 
-        ema_9       = self.data['ema_9'].iloc[-2]
-        ema_15      = self.data['ema_15'].iloc[-2]
+        
         prev_ema_9  = self.data['ema_9'].iloc[-3]
         prev_ema_15 = self.data['ema_15'].iloc[-3]
 
@@ -401,7 +408,7 @@ class Candlestick:
         # while protecting accumulated profit.
         if self.position == 'LONG':
 
-            if prev_ema_15 < prev_ema_9 and ema_15 > ema_9:
+            if (prev_ema_15 < prev_ema_9 and ema_15 > ema_9) or (prev_ema_15 - prev_ema_9 < ema_15 - ema_9):
                 print(f"[EXIT LONG] Death cross at {closed_candle_time}")
                 bid = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['bid']
                 log_trade("Sell", symbol, bid)
@@ -417,7 +424,7 @@ class Candlestick:
 
         elif self.position == 'SHORT':
 
-            if prev_ema_15 > prev_ema_9 and ema_15 < ema_9:
+            if (prev_ema_15 > prev_ema_9 and ema_15 < ema_9) or (prev_ema_9 - prev_ema_15 < ema_9 - ema_15):
                 print(f"[EXIT SHORT] Golden cross at {closed_candle_time}")
                 ask = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['ask']
                 log_trade("Buy", symbol, ask)
@@ -450,8 +457,10 @@ class Candlestick:
             #
             # Together these conditions attempt to enter only
             # when bullish momentum is expanding.
+            avg_length = (self.data.tail()['high'] - self.data.tail()['low']).mean()
             if ((prev_ema_9 - prev_ema_15 < ema_9 - ema_15) and
                 (closed_candle['close'] > ema_9) and
+                (closed_candle['low'] <= ema_9 + avg_length * 0.05) and
                 (ema_9 - ema_15 > 0)):
                 ask = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['ask']
                 log_trade("Buy", symbol, ask)
@@ -476,6 +485,7 @@ class Candlestick:
             # when bearish momentum is expanding.
             elif ((prev_ema_15 - prev_ema_9 < ema_15 - ema_9) and
                   (closed_candle['close'] < ema_9) and
+                  (closed_candle['high'] >= ema_9 - avg_length * 0.05) and
                   (ema_15 - ema_9 > 0)):
                 bid = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['bid']
                 log_trade("Sell", symbol, bid)
@@ -484,6 +494,7 @@ class Candlestick:
                 self.trigger  = closed_candle['low']
                 self.position = 'SHORT'
                 print(f"[SELL] at {bid} | SL: {self.sl} | TP: {self.tp}")
+
 
     # ============================================================
     # Websocket Callback to Handle Errors Events
